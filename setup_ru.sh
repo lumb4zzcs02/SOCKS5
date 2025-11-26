@@ -1,47 +1,26 @@
 #!/bin/bash
 
-# --- Конфигурационные параметры (НЕ МЕНЯЙТЕ ВРУЧНУЮ В СКРИПТЕ!) ---
-# Вместо этого, эти параметры будут использоваться из окружения,
-# или будут автоматически получены, если не заданы.
-# IPv4 адрес для входящих подключений
-IPV4_LISTEN="80.87.108.107"
-# Префикс IPv6 подсети для исходящих подключений (первые 64 бита)
-IPV6_SUBNET_PREFIX="2a01:5560:1001:df4f"
-# Сетевой интерфейс для работы
-INTERFACE="eth0"
-# --- Конец конфигурационных параметров ---
+# Устанавливаем необходимые пакеты
+apt update && apt install -y dante-server apache2-utils qrencode curl
 
-# Функция для вывода ошибок и завершения работы скрипта
-function die() {
-    echo -e "\033[31m[ОШИБКА]\033[0m $1" >&2
+# Определяем правильный сетевой интерфейс (по имени)
+INTERFACE=$(ip route get 8.8.8.8 | awk -- '{print $5}' | head -n 1)
+
+echo "Автоматически определён сетевой интерфейс: $INTERFACE"
+
+# Определяем публичный IPv4-адрес для этого интерфейса
+IPV4_ADDRESS=$(ip a show dev "$INTERFACE" | grep 'inet ' | grep 'global' | awk '{print $2}' | cut -d'/' -f1 | head -n 1)
+
+if [ -z "$IPV4_ADDRESS" ]; then
+    echo "Ошибка: Не удалось определить публичный IPv4-адрес для интерфейса $INTERFACE."
+    echo "Проверьте сетевые настройки или наличие IPv4-адреса на интерфейсе."
     exit 1
-}
-
-echo -e "\033[32m[ИНФО]\033[0m Начинаем настройку SOCKS5 прокси."
-
-# 1. Проверка предусловий
-echo -e "\033[32m[ИНФО]\033[0m Проверка наличия интерфейса и IP-адресов..."
-
-if ! ip link show "$INTERFACE" &>/dev/null; then
-    die "Интерфейс '$INTERFACE' не найден. Убедитесь, что он существует."
 fi
 
-if ! ip -4 addr show dev "$INTERFACE" | grep -q "$IPV4_LISTEN/32"; then
-    die "IPv4 адрес '$IPV4_LISTEN' не настроен на интерфейсе '$INTERFACE'. Пожалуйста, настройте его перед запуском скрипта."
-fi
+echo "Определён публичный IPv4-адрес для интерфейса $INTERFACE: $IPV4_ADDRESS"
 
-# Проверяем, что подсеть IPv6 (хотя бы ::1) присутствует на интерфейсе
-if ! ip -6 addr show dev "$INTERFACE" | grep -q "${IPV6_SUBNET_PREFIX}::1/64"; then
-    echo -e "\033[33m[ПРЕДУПРЕЖДЕНИЕ]\033[0m IPv6 подсеть '${IPV6_SUBNET_PREFIX}::1/64' не найдена на интерфейсе '$INTERFACE'. Убедитесь, что она корректно настроена и маршрутизируется провайдером. Иначе исходящий IPv6 работать не будет."
-fi
 
-echo -e "\033[32m[ИНФО]\033[0m Предварительные проверки успешно пройдены."
-
-# 2. Устанавливаем необходимые пакеты
-echo -e "\033[32m[ИНФО]\033[0m Обновляем список пакетов и устанавливаем dante-server, qrencode..."
-apt update -y && apt install -y dante-server qrencode || die "Не удалось установить необходимые пакеты."
-
-# 3. Функция для генерации случайного порта
+# Функция для генерации случайного порта
 function generate_random_port() {
     while :; do
         port=$((RANDOM % 64512 + 1024))
@@ -52,8 +31,9 @@ function generate_random_port() {
     done
 }
 
-# 4. Получение логина, пароля и порта
+# Спрашиваем у пользователя, хочет ли он ввести логин и пароль сам
 read -p "Хотите ввести логин и пароль вручную? (y/n): " choice
+
 if [[ "$choice" == "y" || "$choice" == "Y" ]]; then
     read -p "Введите имя пользователя: " username
     read -s -p "Введите пароль: " password
@@ -61,12 +41,14 @@ if [[ "$choice" == "y" || "$choice" == "Y" ]]; then
 else
     username=$(tr -dc 'a-zA-Z0-9' </dev/urandom | head -c 8)
     password=$(tr -dc 'a-zA-Z0-9' </dev/urandom | head -c 12)
-        echo -e "\033[32m[ИНФО]\033[0m Сгенерированы логин и пароль:"
+    echo "Сгенерированы логин и пароль:"
     echo "Логин: $username"
     echo "Пароль: $password"
 fi
 
+# Спрашиваем у пользователя, хочет ли он ввести порт вручную
 read -p "Хотите ввести порт вручную? (y/n): " port_choice
+
 if [[ "$port_choice" == "y" || "$port_choice" == "Y" ]]; then
     while :; do
         read -p "Введите порт (1024-65535, не занятый системой): " port
@@ -78,47 +60,18 @@ if [[ "$port_choice" == "y" || "$port_choice" == "Y" ]]; then
     done
 else
     port=$(generate_random_port)
-    echo -e "\033[32m[ИНФО]\033[0m Сгенерирован случайный порт: $port"
+    echo "Сгенерирован случайный порт: $port"
 fi
 
-# 5. Создаём системного пользователя для аутентификации
-echo -e "\033[32m[ИНФО]\033[0m Создаем системного пользователя '$username' для Dante..."
-useradd -r -s /bin/false "$username" || die "Не удалось создать системного пользователя."
-echo -e "$password\n$password" | passwd "$username" || die "Не удалось установить пароль для пользователя."
+# Создаём системного пользователя для аутентификации
+useradd -r -s /bin/false $username
+(echo "$password"; echo "$password") | passwd $username
 
-# 6. Генерируем уникальный IPv6 адрес и добавляем его на интерфейс
-echo -e "\033[32m[ИНФО]\033[0m Генерируем уникальный IPv6 адрес для исходящих подключений..."
-GENERATED_IPV6=""
-for i in {1..10}; do # Попытаемся несколько раз, если вдруг будет коллизия
-    # Генерируем 64 случайных бита (8 байт) для хостовой части
-    # Форматируем их в 4 группы по 4 шестнадцатеричные цифры, разделенные двоеточиями
-    RAND_HEX_PART=$(openssl rand -hex 8 | sed -e 's/\(....\)/\1:/g' -e 's/:$//')
-
-    TEMP_IPV6="${IPV6_SUBNET_PREFIX}:${RAND_HEX_PART}"
-    
-    # Проверяем, существует ли уже такой адрес на интерфейсе
-    if ! ip -6 addr show dev "$INTERFACE" | grep -q "$TEMP_IPV6"; then
-        GENERATED_IPV6="$TEMP_IPV6"
-        break
-    fi
-    sleep 0.1
-done
-
-if [ -z "$GENERATED_IPV6" ]; then
-    die "Не удалось сгенерировать уникальный IPv6 адрес после нескольких попыток."
-fi
-
-echo -e "\033[32m[ИНФО]\033[0m Сгенерирован IPv6: $GENERATED_IPV6"
-ip -6 addr add "${GENERATED_IPV6}/64" dev "$INTERFACE" || die "Не удалось добавить сгенерированный IPv6 адрес на интерфейс $INTERFACE. Проверьте логи ядра (dmesg) и правильность подсети."
-echo -e "\033[32m[ИНФО]\033[0m IPv6 адрес '$GENERATED_IPV6' успешно добавлен на интерфейс '$INTERFACE'."
-
-
-# 7. Создаём конфигурацию для dante-server
-echo -e "\033[32m[ИНФО]\033[0m Создаем конфигурационный файл Dante (/etc/danted.conf)..."
+# Создаём конфигурацию для dante-server
 cat > /etc/danted.conf <<EOL
-logoutput: /var/log/danted.log
-internal: ${IPV4_LISTEN} port = $port
-external: $INTERFACE # <-- ИСПОЛЬЗУЕМ ИМЯ ИНТЕРФЕЙСА ДЛЯ КОРРЕКТНОЙ РАБОТЫ С IPv6
+logoutput: stderr
+internal: 0.0.0.0 port = $port
+external: $IPV4_ADDRESS # Изменено, чтобы явно использовать IPv4
 socksmethod: username
 user.privileged: root
 user.notprivileged: nobody
@@ -135,56 +88,28 @@ socks pass {
         log: error
 }
 EOL
-echo -e "\033[32m[ИНФО]\033[0m Конфигурационный файл Dante успешно создан."
 
-# 8. Открываем порт в брандмауэре UFW
-echo -e "\033[32m[ИНФО]\033[0m Настраиваем UFW..."
-ufw --force enable || echo -e "\033[33m[ПРЕДУПРЕЖДЕНИЕ]\033[0m UFW уже включен или возникла проблема при его включении. Продолжаем."
+# Открываем порт в брандмауэре
+ufw allow $port/tcp
 
-# Удаляем любые общие правила 'allow PORT/tcp', которые могли быть добавлены вручную
-# или предыдущими запусками. Эта команда удалит как IPv4, так и IPv6 правила,
-# если они были добавлены простой командой 'ufw allow PORT/tcp' (или с 'proto tcp').
-# НЕ СОДЕРЖИТ '(v6)'!
-ufw delete allow "${port}/tcp" >/dev/null 2>&1 || true
-ufw delete allow from any to any port "$port" proto tcp >/dev/null 2>&1 || true # Удаляет более общие правила если они были
-ufw delete allow from any to any port "$port" proto udp >/dev/null 2>&1 || true # Для UDP
-ufw delete allow from any to any port "$port" >/dev/null 2>&1 || true # Для любого протокола
+# Перезапускаем и включаем dante-server в автозагрузку
+systemctl restart danted
+systemctl enable danted
 
-# Добавляем специфическое правило для Dante, которое слушает только на указанном IPv4 адресе.
-# Это правило более специфично и не должно конфликтовать с удаляемыми.
-ufw allow from any to "$IPV4_LISTEN" port "$port" proto tcp comment "Dante SOCKS5 Proxy" || die "Не удалось добавить правило UFW для IPv4."
-echo -e "\033[32m[ИНФО]\033[0m Порт $port открыт для IPv4 '$IPV4_LISTEN' в UFW."
+# Выводим информацию
+echo "============================================================="
+echo "SOCKS5-прокси установлен. Подключение:"
+echo "IP: $IPV4_ADDRESS" # Используем определённый IPv4
+echo "Порт: $port"
+echo "Логин: $username"
+echo "Пароль: $password"
+echo "============================================================="
+echo "Готовая строка для антидетект браузеров:"
+echo "$IPV4_ADDRESS:$port:$username:$password" # Используем определённый IPv4
+echo "$username:$password@$IPV4_ADDRESS:$port" # Используем определённый IPv4
+echo "============================================================="
 
-# Перезагружаем UFW, чтобы все изменения применились.
-sudo ufw reload >/dev/null 2>&1 || true
-
-# 9. Перезапускаем и включаем dante-server в автозагрузку
-echo -e "\033[32m[ИНФО]\033[0m Перезапускаем и включаем dante-server..."
-systemctl daemon-reload
-systemctl restart danted || die "Не удалось перезапустить dante-server. Проверьте /var/log/danted.log и journalctl -xeu danted."
-systemctl enable danted || die "Не удалось включить dante-server в автозагрузку."
-systemctl is-active --quiet danted || die "Dante SOCKS5 прокси не запущен. Проверьте логи."
-echo -e "\033[32m[ИНФО]\033[0m Dante SOCKS5 прокси успешно запущен и включен в автозагрузку."
-
-# 10. Выводим информацию
-echo -e "\n============================================================="
-echo -e "\033[32mSOCKS5-прокси установлен и настроен!\033[0m"
-echo " "
-echo -e "\033[1mПараметры подключения к прокси:\033[0m"
-echo "  IP-адрес для подключения: $IPV4_LISTEN"
-echo "  Порт: $port"
-echo "  Логин: $username"
-echo "  Пароль: $password"
-echo " "
-echo -e "\033[1mИсходящий IPv6-адрес (используется для выхода в интернет):\033[0m $GENERATED_IPV6"
-echo " "
-echo -e "\033[1mГотовые строки для антидетект браузеров и других клиентов:\033[0m"
-echo "  $IPV4_LISTEN:$port:$username:$password"
-echo "  $username:$password@$IPV4_LISTEN:$port"
-echo " "
-echo -e "============================================================="
-
-echo -e "\nСпасибо за использование скрипта! Вы можете оставить чаевые по QR-коду ниже:"
+echo "Спасибо за использование скрипта! Вы можете оставить чаевые по QR-коду ниже:"
 qrencode -t ANSIUTF8 "https://pay.cloudtips.ru/p/7410814f"
 echo "Ссылка на чаевые: https://pay.cloudtips.ru/p/7410814f"
 echo "============================================================="
@@ -192,6 +117,3 @@ echo "Рекомендуемые хостинги для VPN и прокси:"
 echo "Хостинг #1: https://vk.cc/ct29NQ (промокод off60 для 60% скидки на первый месяц)"
 echo "Хостинг #2: https://vk.cc/czDwwy (будет действовать 15% бонус в течение 24 часов!)"
 echo "============================================================="
-
-echo -e "\033[32m[ИНФО]\033[0m Скрипт завершил свою работу."
-echo -e "\033[33m[ВАЖНО]\033[0m Если сервер перезагрузится, сгенерированный IPv6 адрес '$GENERATED_IPV6' будет утерян, и прокси перестанет работать с этим IPv6. Вам нужно будет запустить скрипт заново. Для постоянной работы с этим IPv6, его нужно добавить в конфигурацию сети (например, /etc/netplan или /etc/network/interfaces) вручную или через отдельный скрипт."
