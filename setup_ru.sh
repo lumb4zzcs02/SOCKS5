@@ -1,30 +1,65 @@
 #!/bin/bash
+set -euo pipefail # Строгий режим: выход при ошибке, неопределенной переменной, сбое пайпа
+
+echo "=== Запуск скрипта установки SOCKS5-прокси с IPv6 исходящим трафиком ==="
 
 # Устанавливаем необходимые пакеты
-apt update && apt install -y dante-server apache2-utils qrencode curl
+echo "Обновляем списки пакетов и устанавливаем необходимые зависимости..."
+apt update && apt install -y dante-server apache2-utils qrencode curl openssl
 
-# Определяем правильный сетевой интерфейс (по имени)
+# Определяем правильный сетевой интерфейс
 INTERFACE=$(ip route get 8.8.8.8 | awk -- '{print $5}' | head -n 1)
-
 echo "Автоматически определён сетевой интерфейс: $INTERFACE"
 
-# Вывод для отладки: содержимое интерфейса
-echo "Содержимое интерфейса $INTERFACE:"
-ip a show dev "$INTERFACE"
-
-# Определяем публичный IPv4-адрес для этого интерфейса
+# Определяем публичный IPv4-адрес для этого интерфейса (для входящих подключений)
 IPV4_ADDRESS=$(ip a show dev "$INTERFACE" | grep 'inet ' | grep 'global' | awk '{print $2}' | cut -d'/' -f1 | head -n 1)
-
-# Вывод для отладки: значение IPV4_ADDRESS
-echo "IPV4_ADDRESS после обработки: '$IPV4_ADDRESS'"
 
 if [ -z "$IPV4_ADDRESS" ]; then
     echo "Ошибка: Не удалось определить публичный IPv4-адрес для интерфейса $INTERFACE."
     echo "Проверьте сетевые настройки или наличие IPv4-адреса на интерфейсе."
     exit 1
 fi
+echo "Определён публичный IPv4-адрес для входящих подключений: $IPV4_ADDRESS"
 
-echo "Определён публичный IPv4-адрес для интерфейса $INTERFACE: $IPV4_ADDRESS"
+# --- Логика для IPv6 адреса для исходящего трафика ---
+IPV6_SUBNET_PREFIX="2a01:5560:1001:bc20"
+GENERATED_IPV6_ADDRESS=""
+
+echo "Генерируем уникальный IPv6-адрес для исходящего трафика из подсети ${IPV6_SUBNET_PREFIX}::/64..."
+
+# Функция для генерации случайного IPv6 суффикса
+function generate_random_ipv6_suffix() {
+    # Генерируем 64 бита случайных данных (16 шестнадцатеричных символов)
+    local random_hex=$(openssl rand -hex 8)
+    # Форматируем в стандартный вид IPv6 (например, ab:cd:ef:gh:ij:kl:mn:op)
+    echo "${random_hex}" | sed 's/\(..\)/\1:/g; s/:$//'
+}
+
+while [ -z "$GENERATED_IPV6_ADDRESS" ]; do
+    RANDOM_IPV6_SUFFIX=$(generate_random_ipv6_suffix)
+    TEMP_IPV6_ADDR="${IPV6_SUBNET_PREFIX}:${RANDOM_IPV6_SUFFIX}"
+
+    # Проверяем, что сгенерированный адрес не существует на интерфейсе
+    if ! ip -6 addr show dev "$INTERFACE" | grep -q "$TEMP_IPV6_ADDR"; then
+        GENERATED_IPV6_ADDRESS="$TEMP_IPV6_ADDR"
+    fi
+done
+
+echo "Сгенерирован уникальный IPv6-адрес: $GENERATED_IPV6_ADDRESS"
+
+# Добавляем сгенерированный IPv6-адрес на интерфейс eth0
+echo "Добавляем IPv6-адрес $GENERATED_IPV6_ADDRESS/64 на интерфейс $INTERFACE..."
+sudo ip -6 addr add "$GENERATED_IPV6_ADDRESS/64" dev "$INTERFACE"
+
+# Проверяем, что адрес успешно добавлен
+if ! ip -6 addr show dev "$INTERFACE" | grep -q "$GENERATED_IPV6_ADDRESS"; then
+    echo "Ошибка: Не удалось добавить IPv6-адрес $GENERATED_IPV6_ADDRESS на интерфейс $INTERFACE."
+        echo "Возможно, подсеть уже полностью использована или есть другая проблема с сетью."
+    exit 1
+fi
+echo "IPv6-адрес успешно добавлен на интерфейс $INTERFACE."
+echo "Внимание: Этот IPv6-адрес может быть утерян после перезагрузки. Для постоянства настройте его через netplan/systemd-networkd."
+# --- Конец логики для IPv6 ---
 
 
 # Функция для генерации случайного порта
@@ -71,14 +106,16 @@ else
 fi
 
 # Создаём системного пользователя для аутентификации
-useradd -r -s /bin/false $username
-(echo "$password"; echo "$password") | passwd $username
+echo "Создаем системного пользователя $username..."
+useradd -r -s /bin/false "$username"
+(echo "$password"; echo "$password") | passwd "$username"
 
 # Создаём конфигурацию для dante-server
+echo "Создаем конфигурацию для dante-server в /etc/danted.conf..."
 cat > /etc/danted.conf <<EOL
 logoutput: stderr
-internal: 0.0.0.0 port = $port
-external: $IPV4_ADDRESS # Изменено, чтобы явно использовать IPv4
+internal: 0.0.0.0 port = $port # Слушаем на всех IPv4 адресах
+external: $GENERATED_IPV6_ADDRESS # Исходящие соединения через сгенерированный IPv6
 socksmethod: username
 user.privileged: root
 user.notprivileged: nobody
@@ -96,25 +133,33 @@ socks pass {
 }
 EOL
 
-# Открываем порт в брандмауэре
-ufw allow $port/tcp
+# Открываем порт в брандмауэре (для IPv4, так как internal: 0.0.0.0)
+echo "Открываем порт $port/tcp в брандмауэре UFW..."
+ufw allow "$port"/tcp
 
 # Перезапускаем и включаем dante-server в автозагрузку
+echo "Перезапускаем и включаем dante-server в автозагрузку..."
 systemctl restart danted
 systemctl enable danted
 
 # Выводим информацию
 echo "============================================================="
-echo "SOCKS5-прокси установлен. Подключение:"
-echo "IP: $IPV4_ADDRESS" # Используем определённый IPv4
+echo "SOCKS5-прокси установлен."
+echo "-------------------------------------------------------------"
+echo "Для подключения к прокси (используйте этот IP/Порт/Логин/Пароль):"
+echo "IP: $IPV4_ADDRESS"
 echo "Порт: $port"
 echo "Логин: $username"
 echo "Пароль: $password"
-echo "============================================================="
+echo "-------------------------------------------------------------"
+echo "ВАЖНО: Исходящий трафик с этого прокси будет идти через IPv6-адрес:"
+echo "$GENERATED_IPV6_ADDRESS"
+echo "-------------------------------------------------------------"
 echo "Готовая строка для антидетект браузеров:"
-echo "$IPV4_ADDRESS:$port:$username:$password" # Используем определённый IPv4
-echo "$username:$password@$IPV4_ADDRESS:$port" # Используем определённый IPv4
-echo "============================================================="
+echo "$IPV4_ADDRESS:$port:$username:$password"
+echo "$username:$password@$IPV4_ADDRESS:$port"
+echo "=========================== 
+=================================="
 
 echo "Спасибо за использование скрипта! Вы можете оставить чаевые по QR-коду ниже:"
 qrencode -t ANSIUTF8 "https://pay.cloudtips.ru/p/7410814f"
