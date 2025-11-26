@@ -31,14 +31,26 @@ echo "Генерируем уникальный IPv6-адрес для исхо�
 generate_unique_ipv6_host_parts() {
     local p1 p2 p3 p4
     while true; do
-        p1=$(openssl rand -hex 2) # 2 байта = 4 hex-символа = 16 бит
-        p2=$(openssl rand -hex 2)
-        p3=$(openssl rand -hex 2)
-        p4=$(openssl rand -hex 2)
+        # Генерируем 2 байта (4 hex-символа) и убеждаемся, что они имеют 4 символа, дополняя нулями
+        p1=$(printf "%04x" "0x$(openssl rand -hex 2)")
+        p2=$(printf "%04x" "0x$(openssl rand -hex 2)")
+        p3=$(printf "%04x" "0x$(openssl rand -hex 2)")
+        p4=$(printf "%04x" "0x$(openssl rand -hex 2)")
+        
+        # --- Отладочный вывод ---
+        echo "DEBUG_GEN: p1='$p1' (len=${#p1}), p2='$p2' (len=${#p2}), p3='$p3' (len=${#p3}), p4='$p4' (len=${#p4})" >&2
+        # --- Конец отладочного вывода ---
+
         local full_generated_ipv6="${IPV6_SUBNET_PREFIX}:${p1}:${p2}:${p3}:${p4}"
+        
+        # --- Отладочный вывод ---
+        echo "DEBUG_GEN: Проверяемый полный IPv6: '$full_generated_ipv6'" >&2
+        echo "DEBUG_GEN: Количество групп: $(echo "$full_generated_ipv6" | awk -F: '{print NF}')" >&2
+        # --- Конец отладочного вывода ---
+
         # Проверяем, что адрес не существует на интерфейсе
         if ! ip -6 addr show dev "$INTERFACE" | grep -q "$full_generated_ipv6"; then
-            echo "$p1 $p2 $p3 $p4"
+                    echo "$p1 $p2 $p3 $p4"
             return
         fi
         echo "Сгенерированный IPv6-адрес $full_generated_ipv6 уже существует. Генерируем новый..." >&2 # Вывод в stderr
@@ -51,6 +63,12 @@ read -r IPV6_HOST_PART_1 IPV6_HOST_PART_2 IPV6_HOST_PART_3 IPV6_HOST_PART_4 <<< 
 GENERATED_IPV6_ADDRESS="${IPV6_SUBNET_PREFIX}:${IPV6_HOST_PART_1}:${IPV6_HOST_PART_2}:${IPV6_HOST_PART_3}:${IPV6_HOST_PART_4}"
 
 echo "Сгенерирован уникальный IPv6-адрес: $GENERATED_IPV6_ADDRESS"
+
+# --- Отладочный вывод перед добавлением ---
+echo "DEBUG_FINAL: IPv6-адрес для добавления: '$GENERATED_IPV6_ADDRESS'" >&2
+echo "DEBUG_FINAL: Количество групп в окончательном адресе: $(echo "$GENERATED_IPV6_ADDRESS" | awk -F: '{print NF}')" >&2
+# --- Конец отладочного вывода ---
+
 
 # Добавляем сгенерированный IPv6-адрес на интерфейс eth0
 echo "Добавляем IPv6-адрес $GENERATED_IPV6_ADDRESS/64 на интерфейс $INTERFACE..."
