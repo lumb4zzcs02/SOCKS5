@@ -1,12 +1,24 @@
 #!/bin/bash
 
 # Устанавливаем необходимые пакеты
-apt update && apt install -y dante-server apache2-utils qrencode
+apt update && apt install -y dante-server apache2-utils qrencode curl
 
-# Определяем правильный сетевой интерфейс
+# Определяем правильный сетевой интерфейс (по имени)
 INTERFACE=$(ip route get 8.8.8.8 | awk -- '{print $5}' | head -n 1)
 
 echo "Автоматически определён сетевой интерфейс: $INTERFACE"
+
+# Определяем публичный IPv4-адрес для этого интерфейса
+IPV4_ADDRESS=$(ip a show dev "$INTERFACE" | grep 'inet ' | grep 'global' | awk '{print $2}' | cut -d'/' -f1 | head -n 1)
+
+if [ -z "$IPV4_ADDRESS" ]; then
+    echo "Ошибка: Не удалось определить публичный IPv4-адрес для интерфейса $INTERFACE."
+    echo "Проверьте сетевые настройки или наличие IPv4-адреса на интерфейсе."
+    exit 1
+fi
+
+echo "Определён публичный IPv4-адрес для интерфейса $INTERFACE: $IPV4_ADDRESS"
+
 
 # Функция для генерации случайного порта
 function generate_random_port() {
@@ -59,7 +71,7 @@ useradd -r -s /bin/false $username
 cat > /etc/danted.conf <<EOL
 logoutput: stderr
 internal: 0.0.0.0 port = $port
-external: $INTERFACE
+external: $IPV4_ADDRESS # Изменено, чтобы явно использовать IPv4
 socksmethod: username
 user.privileged: root
 user.notprivileged: nobody
@@ -85,17 +97,16 @@ systemctl restart danted
 systemctl enable danted
 
 # Выводим информацию
-ip=$(curl -s ifconfig.me)
 echo "============================================================="
 echo "SOCKS5-прокси установлен. Подключение:"
-echo "IP: $ip"
+echo "IP: $IPV4_ADDRESS" # Используем определённый IPv4
 echo "Порт: $port"
 echo "Логин: $username"
 echo "Пароль: $password"
 echo "============================================================="
 echo "Готовая строка для антидетект браузеров:"
-echo "$ip:$port:$username:$password"
-echo "$username:$password@$ip:$port"
+echo "$IPV4_ADDRESS:$port:$username:$password" # Используем определённый IPv4
+echo "$username:$password@$IPV4_ADDRESS:$port" # Используем определённый IPv4
 echo "============================================================="
 
 echo "Спасибо за использование скрипта! Вы можете оставить чаевые по QR-коду ниже:"
