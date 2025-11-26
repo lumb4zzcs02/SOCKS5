@@ -1,89 +1,12 @@
 #!/bin/bash
-set -euo pipefail # Строгий режим: выход при ошибке, неопределенной переменной, сбое пайпа
-
-echo "=== Запуск скрипта установки SOCKS5-прокси с IPv6 исходящим трафиком ==="
 
 # Устанавливаем необходимые пакеты
-echo "Обновляем списки пакетов и устанавливаем необходимые зависимости..."
-apt update && apt install -y dante-server apache2-utils qrencode curl openssl
+apt update && apt install -y dante-server apache2-utils qrencode
 
 # Определяем правильный сетевой интерфейс
 INTERFACE=$(ip route get 8.8.8.8 | awk -- '{print $5}' | head -n 1)
+
 echo "Автоматически определён сетевой интерфейс: $INTERFACE"
-
-# Определяем публичный IPv4-адрес для этого интерфейса (для входящих подключений)
-IPV4_ADDRESS=$(ip a show dev "$INTERFACE" | grep 'inet ' | grep 'global' | awk '{print $2}' | cut -d'/' -f1 | head -n 1)
-
-if [ -z "$IPV4_ADDRESS" ]; then
-    echo "Ошибка: Не удалось определить публичный IPv4-адрес для интерфейса $INTERFACE."
-    echo "Проверьте сетевые настройки или наличие IPv4-адреса на интерфейсе."
-    exit 1
-fi
-echo "Определён публичный IPv4-адрес для входящих подключений: $IPV4_ADDRESS"
-
-# --- Логика для IPv6 адреса для исходящего трафика ---
-IPV6_SUBNET_PREFIX="2a01:5560:1001:bc20" # Это первые 64 бита (4 группы)
-GENERATED_IPV6_ADDRESS=""
-
-echo "Генерируем уникальный IPv6-адрес для исходящего трафика из подсети ${IPV6_SUBNET_PREFIX}::/64..."
-
-# Генерируем 4 части по 16 бит для хост-идентификатора (последние 64 бита)
-generate_unique_ipv6_host_parts() {
-    local p1 p2 p3 p4
-    while true; do
-        # Генерируем 2 байта (4 hex-символа) и убеждаемся, что они имеют 4 символа, дополняя нулями
-        p1=$(printf "%04x" "0x$(openssl rand -hex 2)")
-        p2=$(printf "%04x" "0x$(openssl rand -hex 2)")
-        p3=$(printf "%04x" "0x$(openssl rand -hex 2)")
-        p4=$(printf "%04x" "0x$(openssl rand -hex 2)")
-        
-        # --- Отладочный вывод ---
-        echo "DEBUG_GEN: p1='$p1' (len=${#p1}), p2='$p2' (len=${#p2}), p3='$p3' (len=${#p3}), p4='$p4' (len=${#p4})" >&2
-        # --- Конец отладочного вывода ---
-
-        local full_generated_ipv6="${IPV6_SUBNET_PREFIX}:${p1}:${p2}:${p3}:${p4}"
-        
-        # --- Отладочный вывод ---
-        echo "DEBUG_GEN: Проверяемый полный IPv6: '$full_generated_ipv6'" >&2
-        echo "DEBUG_GEN: Количество групп: $(echo "$full_generated_ipv6" | awk -F: '{print NF}')" >&2
-        # --- Конец отладочного вывода ---
-
-        # Проверяем, что адрес не существует на интерфейсе
-        if ! ip -6 addr show dev "$INTERFACE" | grep -q "$full_generated_ipv6"; then
-                    echo "$p1 $p2 $p3 $p4"
-            return
-        fi
-        echo "Сгенерированный IPv6-адрес $full_generated_ipv6 уже существует. Генерируем новый..." >&2 # Вывод в stderr
-    done
-}
-
-# Получаем уникальные части
-read -r IPV6_HOST_PART_1 IPV6_HOST_PART_2 IPV6_HOST_PART_3 IPV6_HOST_PART_4 <<< "$(generate_unique_ipv6_host_parts)"
-
-GENERATED_IPV6_ADDRESS="${IPV6_SUBNET_PREFIX}:${IPV6_HOST_PART_1}:${IPV6_HOST_PART_2}:${IPV6_HOST_PART_3}:${IPV6_HOST_PART_4}"
-
-echo "Сгенерирован уникальный IPv6-адрес: $GENERATED_IPV6_ADDRESS"
-
-# --- Отладочный вывод перед добавлением ---
-echo "DEBUG_FINAL: IPv6-адрес для добавления: '$GENERATED_IPV6_ADDRESS'" >&2
-echo "DEBUG_FINAL: Количество групп в окончательном адресе: $(echo "$GENERATED_IPV6_ADDRESS" | awk -F: '{print NF}')" >&2
-# --- Конец отладочного вывода ---
-
-
-# Добавляем сгенерированный IPv6-адрес на интерфейс eth0
-echo "Добавляем IPv6-адрес $GENERATED_IPV6_ADDRESS/64 на интерфейс $INTERFACE..."
-sudo ip -6 addr add "$GENERATED_IPV6_ADDRESS/64" dev "$INTERFACE"
-
-# Проверяем, что адрес успешно добавлен
-if ! ip -6 addr show dev "$INTERFACE" | grep -q "$GENERATED_IPV6_ADDRESS"; then
-    echo "Ошибка: Не удалось добавить IPv6-адрес $GENERATED_IPV6_ADDRESS на интерфейс $INTERFACE."
-    echo "Возможно, подсеть уже полностью использована или есть другая проблема с сетью."
-    exit 1
-fi
-echo "IPv6-адрес успешно добавлен на интерфейс $INTERFACE."
-echo "Внимание: Этот IPv6-адрес будет утерян после перезагрузки. Для постоянства настройте его через netplan/systemd-networkd."
-# --- Конец логики для IPv6 ---
-
 
 # Функция для генерации случайного порта
 function generate_random_port() {
@@ -129,16 +52,14 @@ else
 fi
 
 # Создаём системного пользователя для аутентификации
-echo "Создаем системного пользователя $username..."
-useradd -r -s /bin/false "$username"
-(echo "$password"; echo "$password") | passwd "$username"
+useradd -r -s /bin/false $username
+(echo "$password"; echo "$password") | passwd $username
 
 # Создаём конфигурацию для dante-server
-echo "Создаем конфигурацию для dante-server в /etc/danted.conf..."
 cat > /etc/danted.conf <<EOL
 logoutput: stderr
-internal: 0.0.0.0 port = $port # Слушаем на всех IPv4 адресах
-external: $GENERATED_IPV6_ADDRESS # Исходящие соединения через сгенерированный IPv6
+internal: 0.0.0.0 port = $port
+external: $INTERFACE
 socksmethod: username
 user.privileged: root
 user.notprivileged: nobody
@@ -156,31 +77,25 @@ socks pass {
 }
 EOL
 
-# Открываем порт в брандмауэре (для IPv4, так как internal: 0.0.0.0)
-echo "Открываем порт $port/tcp в брандмауэре UFW..."
-ufw allow "$port"/tcp
+# Открываем порт в брандмауэре
+ufw allow $port/tcp
 
 # Перезапускаем и включаем dante-server в автозагрузку
-echo "Перезапускаем и включаем dante-server в автозагрузку..."
 systemctl restart danted
 systemctl enable danted
 
 # Выводим информацию
+ip=$(curl -s ifconfig.me)
 echo "============================================================="
-echo "SOCKS5-прокси установлен."
-echo "-------------------------------------------------------------"
-echo "Для подключения к прокси (используйте этот IP/Порт/Логин/Пароль):"
-echo "IP: $IPV4_ADDRESS"
+echo "SOCKS5-прокси установлен. Подключение:"
+echo "IP: $ip"
 echo "Порт: $port"
 echo "Логин: $username"
 echo "Пароль: $password"
-echo "-------------------------------------------------------------"
-echo "ВАЖНО: Исходящий трафик с этого прокси будет идти через IPv6-адрес:"
-echo "$GENERATED_IPV6_ADDRESS"
-echo "-------------------------------------------------------------"
+echo "============================================================="
 echo "Готовая строка для антидетект браузеров:"
-echo "$IPV4_ADDRESS:$port:$username:$password"
-echo "$username:$password@$IPV4_ADDRESS:$port"
+echo "$ip:$port:$username:$password"
+echo "$username:$password@$ip:$port"
 echo "============================================================="
 
 echo "Спасибо за использование скрипта! Вы можете оставить чаевые по QR-коду ниже:"
