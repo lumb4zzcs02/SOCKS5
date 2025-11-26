@@ -141,15 +141,21 @@ echo -e "\033[32m[ИНФО]\033[0m Конфигурационный файл Dan
 echo -e "\033[32m[ИНФО]\033[0m Настраиваем UFW..."
 ufw --force enable || echo -e "\033[33m[ПРЕДУПРЕЖДЕНИЕ]\033[0m UFW уже включен или возникла проблема при его включении. Продолжаем."
 
-# Удаляем любые общие правила 'allow PORT/tcp', которые могли быть добавлены вручную.
-# Эта команда удалит как IPv4, так и IPv6 правила, если они были добавлены простой командой 'ufw allow PORT/tcp'.
+# Удаляем любые общие правила 'allow PORT/tcp', которые могли быть добавлены вручную
+# или предыдущими запусками. Эта команда удалит как IPv4, так и IPv6 правила,
+# если они были добавлены простой командой 'ufw allow PORT/tcp' (или с 'proto tcp').
+# НЕ СОДЕРЖИТ '(v6)'!
 ufw delete allow "${port}/tcp" >/dev/null 2>&1 || true
+ufw delete allow from any to any port "$port" proto tcp >/dev/null 2>&1 || true # Удаляет более общие правила если они были
+ufw delete allow from any to any port "$port" proto udp >/dev/null 2>&1 || true # Для UDP
+ufw delete allow from any to any port "$port" >/dev/null 2>&1 || true # Для любого протокола
 
 # Добавляем специфическое правило для Dante, которое слушает только на указанном IPv4 адресе.
+# Это правило более специфично и не должно конфликтовать с удаляемыми.
 ufw allow from any to "$IPV4_LISTEN" port "$port" proto tcp comment "Dante SOCKS5 Proxy" || die "Не удалось добавить правило UFW для IPv4."
 echo -e "\033[32m[ИНФО]\033[0m Порт $port открыт для IPv4 '$IPV4_LISTEN' в UFW."
 
-# Перезагружаем UFW, что бы все изменения применились.
+# Перезагружаем UFW, чтобы все изменения применились.
 sudo ufw reload >/dev/null 2>&1 || true
 
 # 9. Перезапускаем и включаем dante-server в автозагрузку
