@@ -22,28 +22,61 @@ fi
 echo "Определён публичный IPv4-адрес для входящих подключений: $IPV4_ADDRESS"
 
 # --- Логика для IPv6 адреса для исходящего трафика ---
-IPV6_SUBNET_PREFIX="2a01:5560:1001:bc20"
+IPV6_SUBNET_PREFIX="2a01:5560:1001:bc20" # Первые 64 бита
 GENERATED_IPV6_ADDRESS=""
 
 echo "Генерируем уникальный IPv6-адрес для исходящего трафика из подсети ${IPV6_SUBNET_PREFIX}::/64..."
 
-# Функция для генерации случайного IPv6 суффикса
+# Функция для генерации случайного IPv6 суффикса (4 группы по 4 hex-символа = 64 бита)
 function generate_random_ipv6_suffix() {
-    # Генерируем 64 бита случайных данных (16 шестнадцатеричных символов)
-    local random_hex=$(openssl rand -hex 8)
-    # Форматируем в стандартный вид IPv6 (например, ab:cd:ef:gh:ij:kl:mn:op)
-    echo "${random_hex}" | sed 's/\(..\)/\1:/g; s/:$//'
+    local part1=$(openssl rand -hex 2) # 2 байта = 4 hex-символа
+    local part2=$(openssl rand -hex 2)
+    local part3=$(openssl rand -hex 2)
+    local part4=$(openssl rand -hex 2)
+    echo "${part1}:${part2}:${part3}:${part4}"
 }
 
 while [ -z "$GENERATED_IPV6_ADDRESS" ]; do
     RANDOM_IPV6_SUFFIX=$(generate_random_ipv6_suffix)
-    TEMP_IPV6_ADDR="${IPV6_SUBNET_PREFIX}:${RANDOM_IPV6_SUFFIX}"
+    TEMP_IPV6_ADDR="${IPV6_SUBNET_PREFIX}::${RANDOM_IPV6_SUFFIX}" # Используем '::' для сокращения нулей, если есть
+    
+    # Расширяем сокращенный IPv6-адрес для корректной проверки grep
+    FULL_TEMP_IPV6_ADDR=$(printf "%s" "$TEMP_IPV6_ADDR" | ip -6 addr show dev "$INTERFACE" | grep -oP "${IPV6_SUBNET_PREFIX}:.*" | head -n 1)
+
 
     # Проверяем, что сгенерированный адрес не существует на интерфейсе
-    if ! ip -6 addr show dev "$INTERFACE" | grep -q "$TEMP_IPV6_ADDR"; then
-        GENERATED_IPV6_ADDRESS="$TEMP_IPV6_ADDR"
+    if [ -z "$FULL_TEMP_IPV6_ADDR" ] || ! ip -6 addr show dev "$INTERFACE" | grep -q "${TEMP_IPV6_ADDR//::/:0:0:0:0:}"; then
+    # Упрощаем проверку. Если grep не нашел точной строки, значит адрес свободен.
+    # Более надежная проверка - пробовать добавить и обрабатывать ошибку, но это сложнее.
+        # Пока остановимся на grep-проверке, но нужно быть внимательным с сокращениями.
+    # Если IP-адреса не конфликтуют, команда 'ip -6 addr add' сама выдаст ошибку, если адрес уже есть.
+    # Простая проверка на наличие части адреса:
+        if ! ip -6 addr show dev "$INTERFACE" | grep -q "$RANDOM_IPV6_SUFFIX"; then
+            GENERATED_IPV6_ADDRESS="$TEMP_IPV6_ADDR"
+        fi
     fi
 done
+
+# Итоговый адрес должен быть в формате, пригодном для ip -6 addr add.
+# Давайте сформируем его явно, без '::' для генерации, чтобы избежать ошибок.
+# Сгенерируем 4 части (64 бита) и присоединим их к префиксу
+IPV6_HOST_PART_1=$(openssl rand -hex 2)
+IPV6_HOST_PART_2=$(openssl rand -hex 2)
+IPV6_HOST_PART_3=$(openssl rand -hex 2)
+IPV6_HOST_PART_4=$(openssl rand -hex 2)
+
+GENERATED_IPV6_ADDRESS="${IPV6_SUBNET_PREFIX}:${IPV6_HOST_PART_1}:${IPV6_HOST_PART_2}:${IPV6_HOST_PART_3}:${IPV6_HOST_PART_4}"
+
+# Простая проверка на дубликат (может быть не 100% надежной для очень плотных подсетей)
+while ip -6 addr show dev "$INTERFACE" | grep -q "$GENERATED_IPV6_ADDRESS"; do
+    echo "Сгенерированный IPv6-адрес $GENERATED_IPV6_ADDRESS уже существует. Генерируем новый..."
+    IPV6_HOST_PART_1=$(openssl rand -hex 2)
+    IPV6_HOST_PART_2=$(openssl rand -hex 2)
+    IPV6_HOST_PART_3=$(openssl rand -hex 2)
+    IPV6_HOST_PART_4=$(openssl rand -hex 2)
+    GENERATED_IPV6_ADDRESS="${IPV6_SUBNET_PREFIX}:${IPV6_HOST_PART_1}:${IPV6_HOST_PART_2}:${IPV6_HOST_PART_3}:${IPV6_HOST_PART_4}"
+done
+
 
 echo "Сгенерирован уникальный IPv6-адрес: $GENERATED_IPV6_ADDRESS"
 
@@ -54,13 +87,12 @@ sudo ip -6 addr add "$GENERATED_IPV6_ADDRESS/64" dev "$INTERFACE"
 # Проверяем, что адрес успешно добавлен
 if ! ip -6 addr show dev "$INTERFACE" | grep -q "$GENERATED_IPV6_ADDRESS"; then
     echo "Ошибка: Не удалось добавить IPv6-адрес $GENERATED_IPV6_ADDRESS на интерфейс $INTERFACE."
-        echo "Возможно, подсеть уже полностью использована или есть другая проблема с сетью."
+    echo "Возможно, подсеть уже полностью использована или есть другая проблема с сетью."
     exit 1
 fi
 echo "IPv6-адрес успешно добавлен на интерфейс $INTERFACE."
 echo "Внимание: Этот IPv6-адрес может быть утерян после перезагрузки. Для постоянства настройте его через netplan/systemd-networkd."
 # --- Конец логики для IPv6 ---
-
 
 # Функция для генерации случайного порта
 function generate_random_port() {
@@ -158,8 +190,7 @@ echo "-------------------------------------------------------------"
 echo "Готовая строка для антидетект браузеров:"
 echo "$IPV4_ADDRESS:$port:$username:$password"
 echo "$username:$password@$IPV4_ADDRESS:$port"
-echo "=========================== 
-=================================="
+echo "============================================================="
 
 echo "Спасибо за использование скрипта! Вы можете оставить чаевые по QR-коду ниже:"
 qrencode -t ANSIUTF8 "https://pay.cloudtips.ru/p/7410814f"
