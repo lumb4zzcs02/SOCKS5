@@ -20,7 +20,7 @@
 ## 📥 Установка
 
 ```
-wget -O setup_ru.sh https://raw.githubusercontent.com/anten-ka/SOCKS5/main/setup_ru.sh && chmod +x setup_ru.sh && sudo ./setup_ru.sh
+wget -O setup_ru.sh https://raw.githubusercontent.com/lumb4zzcs02/SOCKS5/main/setup_ru.sh && chmod +x setup_ru.sh && sudo ./setup_ru.sh
 ```
 
 ## 🎯 Как использовать
