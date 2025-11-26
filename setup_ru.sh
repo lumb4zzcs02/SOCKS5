@@ -90,8 +90,13 @@ echo -e "$password\n$password" | passwd "$username" || die "Не удалось 
 echo -e "\033[32m[ИНФО]\033[0m Генерируем уникальный IPv6 адрес для исходящих подключений..."
 GENERATED_IPV6=""
 for i in {1..10}; do # Попытаемся несколько раз, если вдруг будет коллизия
-    RAND_HEX=$(openssl rand -hex 8 | sed 's/\(....\)/\1:/g;s/:$//') # Генерируем 64 случайных бита и форматируем их
-    TEMP_IPV6="${IPV6_SUBNET_PREFIX}::${RAND_HEX}"
+    # Генерируем 64 случайных бита (8 байт) для хостовой части
+    # Форматируем их в 4 группы по 4 шестнадцатеричные цифры, разделенные двоеточиями
+    RAND_HEX_PART=$(openssl rand -hex 8 | sed -e 's/\(....\)/\1:/g' -e 's/:$//')
+
+    TEMP_IPV6="${IPV6_SUBNET_PREFIX}:${RAND_HEX_PART}"
+    
+    # Проверяем, существует ли уже такой адрес на интерфейсе
     if ! ip -6 addr show dev "$INTERFACE" | grep -q "$TEMP_IPV6"; then
         GENERATED_IPV6="$TEMP_IPV6"
         break
@@ -104,7 +109,8 @@ if [ -z "$GENERATED_IPV6" ]; then
 fi
 
 echo -e "\033[32m[ИНФО]\033[0m Сгенерирован IPv6: $GENERATED_IPV6"
-ip -6 addr add "${GENERATED_IPV6}/64" dev "$INTERFACE" || die "Не удалось добавить сгенерированный IPv6 адрес на интерфейс $INTERFACE. Возможно, подсеть уже полностью заполнена или есть проблемы с routing."
+# Здесь используется полный сгенерированный адрес с префиксом /64
+ip -6 addr add "${GENERATED_IPV6}/64" dev "$INTERFACE" || die "Не удалось добавить сгенерированный IPv6 адрес на интерфейс $INTERFACE. Проверьте логи ядра (dmesg) и правильность подсети."
 echo -e "\033[32m[ИНФО]\033[0m IPv6 адрес '$GENERATED_IPV6' успешно добавлен на интерфейс '$INTERFACE'."
 
 
