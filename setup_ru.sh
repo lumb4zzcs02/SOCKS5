@@ -8,8 +8,15 @@ INTERFACE=$(ip route get 8.8.8.8 | awk -- '{print $5}' | head -n 1)
 
 echo "Автоматически определён сетевой интерфейс: $INTERFACE"
 
+# Вывод для отладки: содержимое интерфейса
+echo "Содержимое интерфейса $INTERFACE:"
+ip a show dev "$INTERFACE"
+
 # Определяем публичный IPv4-адрес для этого интерфейса
 IPV4_ADDRESS=$(ip a show dev "$INTERFACE" | grep 'inet ' | grep 'global' | awk '{print $2}' | cut -d'/' -f1 | head -n 1)
+
+# Вывод для отладки: значение IPV4_ADDRESS
+echo "IPV4_ADDRESS после обработки: '$IPV4_ADDRESS'"
 
 if [ -z "$IPV4_ADDRESS" ]; then
     echo "Ошибка: Не удалось определить публичный IPv4-адрес для интерфейса $INTERFACE."
